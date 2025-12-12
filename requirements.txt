@@ -1,4 +1,2 @@
 streamlit
-panda
-collections
-re
+pandas
