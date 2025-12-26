@@ -15,8 +15,13 @@ st.title("🗺️ App 架構與埋點檢查")
 # 側邊欄設定
 with st.sidebar:
     st.header("設定")
-    depth = st.slider("顯示層級深度", 1, 10, 5) # 預設深度改為 5
-    st.info("💡 邏輯說明：\n\n僅顯示從 **App 入口 (UUID: 20000001)** 延伸出的節點。\n\n已自動隱藏無標題的排版容器，讓層級更清晰。")
+    depth = st.slider("顯示層級深度", 1, 10, 5)
+    st.info("💡 邏輯說明：\n\n僅顯示從 **App 入口 (UUID: 20000001)** 延伸出的節點。\n\n已自動隱藏無標題的排版容器。")
+    st.divider()
+    st.markdown("### 圖例")
+    st.markdown("🟡 **雙圈**：App 入口")
+    st.markdown("🔴 **紅框/紅字**：該節點有埋點 (Event)")
+    st.markdown("📂 **藍色**：分頁/導航容器")
 
 uploaded_file = st.file_uploader("📂 請先上傳 blueprint.json", type="json")
 
@@ -35,12 +40,13 @@ if uploaded_file:
         st.stop()
 
     # --- 建立 Tabs ---
-    tab1, tab2 = st.tabs(["🗺️ IA 架構圖", "🔍 Event ID 埋點健檢"])
+    tab1, tab2 = st.tabs(["🗺️ IA 架構圖 (導覽)", "🔍 Event ID 埋點健檢"])
 
     # === Tab 1: 架構圖 ===
     with tab1:
         st.caption(f"目前顯示深度: {depth} (從 App 入口開始)")
         
+        # 建立 Graphviz 物件
         dot = graphviz.Digraph(comment='App Structure')
         dot.attr(rankdir='LR') # 由左至右
         dot.attr('node', fontname='Microsoft JhengHei', shape='box', style='filled')
@@ -57,19 +63,24 @@ if uploaded_file:
             style = "filled,rounded"
             border_color = "black"
             font_color = "black"
+            pen_width = "1"
             
-            # 顯示標籤增強
+            # 顯示標籤增強 (移除 Event ID 文字，僅保留視覺提示)
             display_label = n_label
+            
             if n_event:
-                display_label += f"\n(Event: {n_event})"
-                border_color = "red" # 有埋點的框線變紅
-                font_color = "#B22222" #文字變深紅
-                fill = "#FFF0F0" # 背景淡紅
+                # display_label += f"\n({n_event})"  <-- 已移除此行，不顯示 ID
+                border_color = "red"     # 框線變紅
+                font_color = "#B22222"   # 文字變深紅
+                fill = "#FFF0F0"         # 背景淡紅
+                pen_width = "2"          # 框線加粗
 
             if n_id == "20000001": # Root
                 fill = "#FFD700"
                 shape = "doubleoctagon"
                 display_label = "📱 App 入口"
+                border_color = "black"
+                font_color = "black"
             elif node["type"] in ["分頁容器", "底部分頁容器", "頁籤分頁容器"]:
                 fill = "#ADD8E6" # 藍色導航
                 shape = "folder"
@@ -77,13 +88,42 @@ if uploaded_file:
                 style = "dashed"
                 fill = "#FFFFFF"
 
-            dot.node(n_id, display_label, fillcolor=fill, shape=shape, style=style, color=border_color, fontcolor=font_color)
+            dot.node(n_id, display_label, fillcolor=fill, shape=shape, style=style, color=border_color, fontcolor=font_color, penwidth=pen_width)
 
         # 繪製連線
         for parent, child in graph_data["edges"]:
             dot.edge(parent, child)
 
+        # 顯示圖表
         st.graphviz_chart(dot, use_container_width=True)
+
+        # --- 新增下載按鈕 ---
+        st.divider()
+        col_dl1, col_dl2 = st.columns(2)
+        
+        try:
+            # 渲染成 PNG 的二進位資料
+            png_bytes = dot.pipe(format='png')
+            
+            with col_dl1:
+                st.download_button(
+                    label="📥 下載架構圖 (PNG 圖片)",
+                    data=png_bytes,
+                    file_name="app_structure.png",
+                    mime="image/png"
+                )
+            
+            # 渲染成 SVG (向量圖，無限放大不失真)
+            svg_bytes = dot.pipe(format='svg')
+            with col_dl2:
+                st.download_button(
+                    label="📥 下載架構圖 (SVG 向量圖)",
+                    data=svg_bytes,
+                    file_name="app_structure.svg",
+                    mime="image/svg"
+                )
+        except Exception as e:
+            st.warning("⚠️ 無法產生下載檔案 (可能缺少系統 Graphviz 函式庫)。但在網頁上檢視是正常的。")
 
     # === Tab 2: 埋點健檢 ===
     with tab2:
