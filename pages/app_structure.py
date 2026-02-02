@@ -75,8 +75,8 @@ option = {
             "symbol": "roundRect", # 圓角矩形
             "symbolSize": [140, 35], # 寬, 高
 
-            # 垂直佈局 (Top to Bottom)
-            "orient": "TB",  # TB = Top-Bottom, vertical
+            # 垂直佈局 (Top to Bottom) 改為 水平佈局 (Left to Right)
+            "orient": "LR",  
             
             "label": {
                 "position": "inside", # 文字在框內

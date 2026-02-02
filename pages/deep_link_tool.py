@@ -39,6 +39,7 @@ presets = {
     "Content Article": "內容專區文章 (Article)",
     "Content Video": "內容專區影音 (Video)",
     "Stock": "個股頁 (Stock)",
+    "Purchase": "內購頁 (Purchase)",
 }
 
 # 讓按鈕排成一列 (Pills or Radio horizontal)
@@ -65,7 +66,6 @@ if scenario != st.session_state['last_scenario']:
         st.toast(f"已自動定位「社團」分頁於 Index: {idx}")
         
         # 2. 自動找社團內部的 "看板" (通常預設為 0)
-        # 這裡未來可以做更細的搜尋，目前預設 0
         new_params["int-boardIndex"] = "0"
         
         if scenario == "Club Board":
@@ -76,7 +76,7 @@ if scenario != st.session_state['last_scenario']:
             # 社團文章需要文章 ID
             new_uuids.append("8765433712") # Base Club Article UUID
             new_params["long-stateArticleId"] = ""
-
+    
     elif "Content" in scenario:
         # 1. 自動找 "內容" 或 "Content"
         idx, content_tab_uuid = find_tab_index_by_name(blueprint_data, ["內容", "Content"])
@@ -104,8 +104,23 @@ if scenario != st.session_state['last_scenario']:
         new_uuids.append("40000001")
         new_params["string-stateCommKey"] = "2330" # 預設台積電
 
+    elif scenario == "Purchase":
+        new_uuids.append("888770000001")
+
+    st.session_state['dl_uuids'] = new_uuids
     st.session_state['dl_uuids'] = new_uuids
     st.session_state['dl_params'] = new_params
+    
+    # 3. 強制刷新 Widget State
+    # 當我們改變 params 時，如果不清除對應的 widget key，Streamlit 還是會顯示舊的 widget value (Pre 2.0 behavior assumption but safer)
+    # 這裡我們主動清除 ui 綁定的 key，讓它重新讀取 params 的值
+    keys_to_clear = []
+    for k in list(st.session_state.keys()):
+        if k.startswith("in_"):
+            keys_to_clear.append(k)
+    for k in keys_to_clear:
+        del st.session_state[k]
+
     st.rerun()
 
 # --- 2. 介面顯示 ---
@@ -131,36 +146,67 @@ with col2:
         # 優先顯示與目前情境相關的參數
         priority_keys = ["int-main_tab_index", "int-boardIndex", "long-stateBoardId", "int-contentSectionIndex", "string-stateCommKey", "string-stateDetailPageParam", "long-stateArticleId"]
         
+        def render_param_input(key, label_override=None):
+            def_data = param_defs.get(key, {})
+            label = label_override or def_data.get('label', key)
+            current_val = st.session_state['dl_params'].get(key, "0")
+            
+            # Check if options exist
+            opts = def_data.get('options')
+            if opts and isinstance(opts, dict) and len(opts) > 0:
+                # Dropdown
+                # Ensure current value is in options, otherwise add it temporarily or reset? 
+                # Usually we trust the options. If current_val not in options, we might want to sanitize it.
+                # But for simplicity, we just list keys.
+                opt_keys = list(opts.keys())
+                
+                # If current value is not in options (e.g. custom input), we might default to first option
+                if current_val not in opt_keys:
+                    # Try to match by value? Or just reset? 
+                    # Let's just pick the first one if not found.
+                    if opt_keys:
+                         current_val = opt_keys[0]
+
+                idx = opt_keys.index(current_val) if current_val in opt_keys else 0
+                
+                selected = st.selectbox(
+                    f"{label} ({key})", 
+                    options=opt_keys, 
+                    index=idx,
+                    format_func=lambda x: f"{opts[x]} ({x})",
+                    key=f"in_{key}_select"
+                )
+                
+                if selected != st.session_state['dl_params'].get(key):
+                    st.session_state['dl_params'][key] = selected
+                    st.rerun()
+            else:
+                # Text Input
+                val = st.text_input(f"{label} ({key})", value=current_val, key=f"in_{key}")
+                if val != st.session_state['dl_params'].get(key):
+                    st.session_state['dl_params'][key] = val
+                    st.rerun()
+
         # 顯示 Main Tab
-        val = st.text_input("Main Tab Index", value=st.session_state['dl_params'].get('int-main_tab_index', "0"), key="in_main_tab")
-        if val != st.session_state['dl_params'].get('int-main_tab_index'):
-            st.session_state['dl_params']['int-main_tab_index'] = val
-            st.rerun()
+        render_param_input("int-main_tab_index", "Main Tab Index")
 
         # 顯示其他活躍參數
         current_keys = list(st.session_state['dl_params'].keys())
         for key in priority_keys:
             if key in current_keys and key != "int-main_tab_index":
-                label = param_defs.get(key, {}).get('label', key)
-                val = st.text_input(f"{label} ({key})", value=st.session_state['dl_params'][key], key=f"in_{key}")
-                if val != st.session_state['dl_params'][key]:
-                    st.session_state['dl_params'][key] = val
-                    st.rerun()
+                render_param_input(key)
         
         # 顯示剩餘參數
         for key in current_keys:
             if key not in priority_keys:
-                 val = st.text_input(key, value=st.session_state['dl_params'][key], key=f"in_{key}")
-                 if val != st.session_state['dl_params'][key]:
-                    st.session_state['dl_params'][key] = val
-                    st.rerun()
+                 render_param_input(key)
 
 # --- 3. 結果 ---
 st.markdown("---")
 st.subheader("🚀 Result Link")
 uuids_str = ",".join(st.session_state['dl_uuids'])
 params_list = [f"{k}={v}" for k, v in st.session_state['dl_params'].items() if v]
-final_url = f"https://www.cmoney.tw/app/?uuids={uuids_str}"
+final_url = f"https://www.cmoney.tw/app?uuids={uuids_str}"
 if params_list:
     final_url += "&" + "&".join(params_list)
 

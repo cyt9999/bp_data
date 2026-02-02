@@ -1,4 +1,5 @@
 import json
+import os
 import zipfile
 import re
 import streamlit as st
@@ -12,6 +13,17 @@ def init_session_state():
         st.session_state['blueprint_data'] = None
     if 'current_file_name' not in st.session_state:
         st.session_state['current_file_name'] = "尚未上傳"
+    
+    # Auto-load blueprint.json if exists and data is empty
+    if st.session_state['blueprint_data'] is None:
+        try:
+            default_path = os.path.join(os.path.dirname(__file__), "blueprint.json")
+            if os.path.exists(default_path):
+                 with open(default_path, "r", encoding='utf-8') as f:
+                     st.session_state['blueprint_data'] = json.load(f)
+                 st.session_state['current_file_name'] = "Default (blueprint.json)"
+        except Exception as e:
+            print(f"Failed to load default blueprint: {e}")
 
 def render_global_sidebar():
     init_session_state()
@@ -41,10 +53,18 @@ def _process_uploaded_file(uploaded_file):
         filename = uploaded_file.name
         if filename.endswith('.zip'):
             with zipfile.ZipFile(uploaded_file) as z:
-                target = next((f for f in z.namelist() if f.lower() == 'blueprint.json'), None)
+                # 搜尋所有檔案，不分大小寫，只要檔名是 blueprint.json 即可
+                target = None
+                for f in z.namelist():
+                     if os.path.basename(f).lower() == 'blueprint.json':
+                         target = f
+                         break
+                
                 if target:
                     with z.open(target) as f:
                         return json.load(f)
+                else:
+                    st.error("❌ ZIP 檔中未找到 `blueprint.json`，請確認檔案結構。")
         elif filename.endswith('.json'):
             uploaded_file.seek(0)
             return json.load(uploaded_file)
@@ -125,28 +145,104 @@ def find_tab_index_by_name(blueprint_data, keyword_list, parent_uuid="20000001")
         name = comp.get('name', '')
         title = clean_title(comp.get('parameters', {}).get('title', ''))
         if not title: title = clean_title(comp.get('title', ''))
+        
+        # Case-insensitive check
+        check_name = name.lower()
+        check_title = title.lower()
+        
         for kw in keyword_list:
-            if kw in title or kw in name: return str(idx), comp.get('uuid')
+            k_lower = kw.lower()
+            if k_lower in check_title or k_lower in check_name: return str(idx), comp.get('uuid')
     return "0", None
 def parse_blueprint_for_deeplink(data):
     # (邏輯同前，請保留)
     known_pages = get_base_known_pages()
     param_defs = get_default_param_defs()
     if not data: return known_pages, param_defs
-    root_node = next((n for n in (data.get('subComponents', []) or []) if n.get('uuid') == "20000001"), None)
-    if not root_node and data.get('uuid') == "20000001": root_node = data
+    
+    # 搜尋 Root Node logic
+    root_node = None
+    target_uuid = "20000001"
+    
+    if data.get('uuid') == target_uuid:
+        root_node = data
+    else:
+        def _find_root(node):
+            if node.get('uuid') == target_uuid: return node
+            # Search in subComponents AND pages
+            children = (node.get('subComponents') or []) + (node.get('pages') or [])
+            for child in children:
+                if isinstance(child, dict):
+                    res = _find_root(child)
+                    if res: return res
+            return None
+        root_node = _find_root(data)
+
     if root_node and 'subComponents' in root_node:
         main_tab_opts = {}
-        idx = 0
-        for comp in root_node['subComponents']:
+        for idx, comp in enumerate(root_node['subComponents']):
             raw_title = comp.get('title') or (comp.get('parameters') or {}).get('title') or comp.get('name')
+            # 這裡的邏輯是過濾掉純容器且無意義標題的節點，但必須確保 Key (idx) 對應到真實的陣列索引
             if raw_title and "靜態容器" not in raw_title and "分頁容器" not in raw_title:
                 clean = re.sub(r'{{|}}', '', raw_title).strip()
                 if clean:
                     main_tab_opts[str(idx)] = clean
                     if comp.get('uuid') and comp['uuid'] != "20000001": known_pages[comp['uuid']] = {"name": f"Tab {idx}: {clean}", "params": [], "is_base": False, "dynamic": True}
-                    idx += 1
         if main_tab_opts: param_defs['int-main_tab_index']['options'] = main_tab_opts
+        
+        # --- Content Tab Special Parsing ---
+        # Find Content Tab (index 4 usually)
+        content_tab_idx, content_tab_uuid = find_tab_index_by_name(data, ["內容", "Content"], "20000001")
+        if content_tab_uuid:
+            # Find the Pager Container inside Content Tab (Layer 2, usually index 2)
+            # We need to find the node first
+            def _find_node(node, t_uuid):
+                if node.get('uuid') == t_uuid: return node
+                children = (node.get('subComponents') or []) + (node.get('pages') or [])
+                for child in children:
+                    res = _find_node(child, t_uuid)
+                    if res: return res
+                return None
+            
+            content_node = _find_node(root_node, content_tab_uuid)
+            if content_node and 'subComponents' in content_node:
+                # Based on debug: [0] Nav, [1] Nav, [2] Pager Container
+                # We look for a component that has subComponents which are Tab Pagers
+                pager_node = None
+                for child in content_node['subComponents']:
+                    if child.get('name') == "分頁容器":
+                        pager_node = child
+                        break
+                
+                if pager_node and 'subComponents' in pager_node:
+                    # define contentSectionIndex options
+                    param_defs['int-contentSectionIndex'] = {
+                        "label": "Content Section",
+                        "options": {"0": "文章 (Article)", "1": "影音 (Video)"},
+                        "defaultValue": "0"
+                    }
+                    
+                    # Parse Article Tabs (Index 0)
+                    if len(pager_node['subComponents']) > 0:
+                        article_container = pager_node['subComponents'][0]
+                        if 'subComponents' in article_container:
+                            art_opts = {}
+                            for i, sub in enumerate(article_container['subComponents']):
+                                title = clean_title(sub.get('parameters', {}).get('title', ''))
+                                if title: art_opts[str(i)] = title
+                            if art_opts:
+                                param_defs['int-notesContentTabIndex']['options'] = art_opts
+
+                    # Parse Video Tabs (Index 1)
+                    if len(pager_node['subComponents']) > 1:
+                        video_container = pager_node['subComponents'][1]
+                        if 'subComponents' in video_container:
+                            vid_opts = {}
+                            for i, sub in enumerate(video_container['subComponents']):
+                                title = clean_title(sub.get('parameters', {}).get('title', ''))
+                                if title: vid_opts[str(i)] = title
+                            if vid_opts:
+                                param_defs['int-videoContentTabIndex']['options'] = vid_opts
     def recursive_find_pages(node):
         if not isinstance(node, dict): return
         uuid = node.get('uuid')
@@ -278,5 +374,198 @@ def get_echarts_tree_data(data, root_uuid="20000001", show_event_id=True, initia
 #  5. 資料源分析 (For bp_analyzer.py)
 # ==========================================
 def analyze_blueprint_content(json_content_or_dict):
-    # (省略以節省篇幅)
-    return [], 0
+    results = []
+    count = 0
+    
+    if not json_content_or_dict:
+        return results, count
+
+    # Helper to traverse and extract info
+    def _traverse_subtree(node, context_group, breadcrumbs=None):
+        if breadcrumbs is None: breadcrumbs = []
+        nonlocal count
+        count += 1
+        
+        # Determine if this node adds to the context (Title)
+        # We only care about explicit titles (usually user-defined sub-pages or sections)
+        current_crumbs = list(breadcrumbs)
+        
+        raw_t = node.get('title') or (node.get('parameters') or {}).get('title')
+        if raw_t:
+            clean = re.sub(r'{{|}}', '', raw_t).strip()
+            # Filter out likely layout internal names if necessary, but usually 'title' param is significant.
+            # We skip 'Root' or empty strings
+            if clean:
+                current_crumbs.append(clean)
+        
+        if isinstance(node, dict):
+            # Check for data sources
+            params = node.get('parameters', {})
+            sources = params.get('source')
+            
+            if sources and isinstance(sources, list):
+                info = get_node_info(node)
+                comp_self_label = info.get('label', 'Unknown')
+                
+                # Construct Layout Context String
+                # User wants "Mother Layer", e.g. "Live Replay", "Bonds"
+                # We join the breadcrumbs.
+                # If breadcrumbs exist, use them. If the last crumb is same as self label, maybe distinct?
+                # E.g. Crumb: ["Stock", "Watchlist"], Self: "Watchlist Table" -> "Watchlist > Watchlist Table"
+                
+                # If crumbs are empty, use self label.
+                # If crumbs exist, we assume they provide the path.
+                # We exclude the 'Main Tab' name from crumbs if it's redundant with Group Name, 
+                # but 'context_group' is passed separately.
+                
+                # Filter out crumbs that strictly match the group name to avoid "Stock > Stock > Sub"
+                filtered_crumbs = [c for c in current_crumbs if c != context_group]
+                
+                if filtered_crumbs:
+                    # e.g. "Live Replay"
+                    context_str = " > ".join(filtered_crumbs)
+                    # Append self label for precision? User said "Show the mother layer corresponding table"
+                    # Maybe just "Mother Layer" is enough? But multiple tables might exist.
+                    # Let's do: "Mother Layer (Component Name)"
+                    display_name = f"{context_str} ({comp_self_label})"
+                else:
+                    display_name = comp_self_label
+
+                for src in sources:
+                    src_type = src.get('name', 'Unknown')
+                    src_params = src.get('sourceParameters', {})
+                    
+                    src_id = "N/A"
+                    if src_type == "GoogleSheet":
+                        src_id = f"{src_params.get('sheetName', 'Unknown')} ({src_params.get('sheetId', '')})"
+                    elif src_type == "dtno":
+                        src_id = src_params.get('dtnoNum', 'Unknown')
+                    elif src_type == "AddInfoDtno":
+                         src_id = src_params.get('dtnoNum', 'Unknown')
+                    
+                    fields = []
+                    has_explicit = False
+                    if 'columns' in src_params and isinstance(src_params['columns'], list):
+                        fields = src_params['columns']
+                        has_explicit = True
+                    
+                    results.append({
+                        "group": context_group,
+                        "display_name": display_name,
+                        "source_type": src_type,
+                        "source_id": src_id,
+                        "has_explicit_columns": has_explicit,
+                        "fields_info": fields
+                    })
+
+            # Recurse
+            children = (node.get('subComponents') or []) + (node.get('pages') or [])
+            for child in children:
+                _traverse_subtree(child, context_group, current_crumbs)
+
+    # 1. Find Root (Bottom Tab Container)
+    root_node = None
+    target_uuid = "20000001"
+    
+    if json_content_or_dict.get('uuid') == target_uuid:
+        root_node = json_content_or_dict
+    else:
+        def _find_root(node):
+            if node.get('uuid') == target_uuid: return node
+            children = (node.get('subComponents') or []) + (node.get('pages') or [])
+            for child in children:
+                if isinstance(child, dict):
+                    res = _find_root(child)
+                    if res: return res
+            return None
+        root_node = _find_root(json_content_or_dict)
+
+    if root_node and 'subComponents' in root_node:
+        # 2. Iterate Main Tabs
+        for idx, tab in enumerate(root_node['subComponents']):
+            # Determine Group Name (Tab Name)
+            raw_t = tab.get('title') or (tab.get('parameters') or {}).get('title') or tab.get('name')
+            group_name = f"Tab {idx}"
+            if raw_t:
+                clean = re.sub(r'{{|}}', '', raw_t).strip()
+                if clean: group_name = clean
+            
+            # Traverse this tab's subtree
+            # We don't verify 'breadcrumbs' here because the Tab Name is the Group Name.
+            # We start crumbs empty so subs will capture their own titles.
+            _traverse_subtree(tab, group_name, [])
+    else:
+        # Fallback
+        _traverse_subtree(json_content_or_dict, "Global (No Tabs Found)")
+        
+    return results, count
+    return results, count
+
+# ==========================================
+#  6. 主程式 (Dashboard Rendering)
+# ==========================================
+if __name__ == "__main__":
+    st.set_page_config(page_title="Blueprint 萬能工具箱", layout="wide", page_icon="🛠️")
+    render_global_sidebar()
+    
+    st.title("� Blueprint 萬能工具箱")
+    # ==========================================
+    #  Main Portal UI
+    # ==========================================
+    data = st.session_state.get('blueprint_data')
+    
+    # 1. Upload Warning
+    if not data:
+        st.warning("⚠️ 請先於左側 sidebar 上傳 `blueprint.json` 或 zip 檔以啟用所有功能。")
+    
+    st.markdown("### 🛠️ 工具模組")
+    st.divider()
+
+    # 2. Tool Grid (2x2)
+    col1, col2 = st.columns(2)
+    
+    # Row 1
+    with col1:
+        with st.container(border=True):
+            st.subheader("🔗 Deep Link 生成器")
+            st.markdown("快速生成並測試 App 跳轉連結 (Deep Link)。")
+            if data:
+                st.page_link("pages/deep_link_tool.py", label="開啟工具", icon="➡️", use_container_width=True)
+            else:
+                 st.button("請先上傳檔案", disabled=True, key="btn_dl_disabled")
+
+        with st.container(border=True):
+             st.subheader("🗺️ App Sitemap Structure")
+             st.markdown("可視化檢視 App 頁面結構與導航層級。")
+             if data:
+                st.page_link("pages/app_structure.py", label="開啟工具", icon="➡️", use_container_width=True)
+             else:
+                 st.button("請先上傳檔案", disabled=True, key="btn_map_disabled")
+
+    with col2:
+        with st.container(border=True):
+            st.subheader("📊 資料源分析儀")
+            st.markdown("解析 Blueprint 資料來源 (GoogleSheet/DTNO)。")
+            if data:
+                st.page_link("pages/bp_analyzer.py", label="開啟工具", icon="➡️", use_container_width=True)
+            else:
+                 st.button("請先上傳檔案", disabled=True, key="btn_ana_disabled")
+
+        with st.container(border=True):
+            st.subheader("📈 埋點管理 (Data Mining)")
+            st.markdown("檢視與管理 App 事件埋點 (Click/View)。")
+            if data:
+                st.page_link("pages/data_mining.py", label="開啟工具", icon="➡️", use_container_width=True)
+            else:
+                 st.button("請先上傳檔案", disabled=True, key="btn_dm_disabled")
+
+    st.markdown("---")
+
+    # 3. Status Footer
+    if data:
+        fname = st.session_state.get('current_file_name', 'Unknown')
+        pname = data.get('name', 'Unknown')
+        pver = data.get('version', 'Unknown')
+        st.success(f"📌 當前載入: **{fname}** (專案: {pname} v{pver})")
+    else:
+        st.info("ℹ️ 等待檔案上傳中...")
