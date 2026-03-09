@@ -84,6 +84,13 @@ tools = [
         "desc": "視覺化呈現 App 的 IA 架構與導航層級，支援圖片下載。",
         "page": "pages/app_structure.py",
         "btn_label": "查看架構"
+    },
+    {
+        "title": "App 說明文件產生器",
+        "icon": "📝",
+        "desc": "根據 Blueprint 自動產出 App 說明文件 (Markdown)，可作為 Chatbot 知識庫。",
+        "page": "pages/app_doc_generator.py",
+        "btn_label": "產生文件"
     }
 ]
 
