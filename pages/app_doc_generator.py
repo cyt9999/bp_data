@@ -234,41 +234,111 @@ def _parse_lock_condition(condition):
 def _get_data_index_with_lock(data):
     """
     取得數據指標索引（按區塊分組），同時偵測 lock 條件。
+    直接在遍歷 blueprint 時同步偵測同一元件的 lock。
     回傳: OrderedDict, key=(所在頁面, 所在區塊) -> {"fields": [...], "lock": str|None}
     """
-    results, _ = analyze_blueprint_content(data)
-
-    # 同時提取 lock 資訊
-    lock_map = _extract_lock_info(data)
-
+    # 用自訂遍歷同時提取 fields 和 lock
     grouped = OrderedDict()
-    for r in results:
-        fields = r.get("fields_info", [])
-        field_names = [f for f in fields if isinstance(f, str)]
-        cleaned_fields = []
-        for f in field_names:
-            if " (" in f and f.endswith(")"):
-                cleaned_fields.append(f.rsplit(" (", 1)[0])
-            else:
-                cleaned_fields.append(f)
 
-        if not cleaned_fields:
-            continue
+    root_node = None
+    target_uuid = "20000001"
+    if data.get('uuid') == target_uuid:
+        root_node = data
+    else:
+        def _find_root(node):
+            if node.get('uuid') == target_uuid: return node
+            children = (node.get('subComponents') or []) + (node.get('pages') or [])
+            for child in children:
+                if isinstance(child, dict):
+                    res = _find_root(child)
+                    if res: return res
+            return None
+        root_node = _find_root(data)
 
-        key = (r["group"], r["display_name"])
-        if key not in grouped:
-            grouped[key] = {"fields": [], "lock": None}
-        for field in cleaned_fields:
-            if field not in grouped[key]["fields"]:
-                grouped[key]["fields"].append(field)
+    if not root_node:
+        return grouped
 
-    # 匹配 lock 條件到各區塊
-    for (page, block), info in grouped.items():
-        for lock_context, condition in lock_map.items():
-            # lock_context 是麵包屑路徑，嘗試匹配到所在區塊
-            if block in lock_context or page in lock_context:
-                info["lock"] = _parse_lock_condition(condition)
-                break
+    def _traverse(node, group_name, breadcrumbs=None):
+        if breadcrumbs is None:
+            breadcrumbs = []
+        if not isinstance(node, dict):
+            return
+
+        current_crumbs = list(breadcrumbs)
+        raw_t = node.get('title') or (node.get('parameters') or {}).get('title')
+        if raw_t:
+            clean = re.sub(r'{{|}}', '', raw_t).strip()
+            if clean:
+                current_crumbs.append(clean)
+
+        params = node.get('parameters', {})
+        sources = params.get('source')
+
+        if sources and isinstance(sources, list):
+            # 取得欄位名稱
+            fields = []
+            for src in sources:
+                src_params = src.get('sourceParameters', {})
+                if 'columns' in src_params and isinstance(src_params['columns'], list):
+                    for f in src_params['columns']:
+                        if isinstance(f, str):
+                            if " (" in f and f.endswith(")"):
+                                fields.append(f.rsplit(" (", 1)[0])
+                            else:
+                                fields.append(f)
+
+            # 偵測同一元件的 lock
+            lock_condition = None
+            # 檢查 tableSetting.columns
+            table_setting = params.get('tableSetting', {})
+            if isinstance(table_setting, dict):
+                for col in table_setting.get('columns', []):
+                    if isinstance(col, dict) and 'lock' in col:
+                        cond = col['lock'].get('condition', '')
+                        if cond:
+                            lock_condition = _parse_lock_condition(cond)
+                            break
+
+            if fields or lock_condition:
+                # 建立 display_name
+                comp_name = node.get('name', 'Unknown')
+                raw_title = (node.get('parameters') or {}).get('title')
+                if not raw_title:
+                    raw_title = node.get('title')
+                title = clean_title(raw_title) if raw_title else ''
+                comp_label = title if title else comp_name
+
+                filtered_crumbs = [c for c in current_crumbs if c != group_name]
+                if filtered_crumbs:
+                    display_name = f"{' > '.join(filtered_crumbs)} ({comp_label})"
+                else:
+                    display_name = comp_label
+
+                key = (group_name, display_name)
+                if key not in grouped:
+                    grouped[key] = {"fields": [], "lock": lock_condition}
+                else:
+                    # 如果之前沒有 lock 但現在有，更新
+                    if lock_condition and not grouped[key]["lock"]:
+                        grouped[key]["lock"] = lock_condition
+                for field in fields:
+                    if field not in grouped[key]["fields"]:
+                        grouped[key]["fields"].append(field)
+
+        # 遞迴子節點
+        children = (node.get('subComponents') or []) + (node.get('pages') or [])
+        for child in children:
+            _traverse(child, group_name, current_crumbs)
+
+    # 從 root 的 subComponents（各 Tab）開始遍歷
+    for idx, tab in enumerate(root_node.get('subComponents', [])):
+        raw_t = tab.get('title') or (tab.get('parameters') or {}).get('title') or tab.get('name')
+        group_name = f"Tab {idx}"
+        if raw_t:
+            clean = re.sub(r'{{|}}', '', raw_t).strip()
+            if clean:
+                group_name = clean
+        _traverse(tab, group_name, [])
 
     return grouped
 
@@ -347,10 +417,8 @@ def generate_markdown(app_name, app_desc, ios_link, android_link, data):
             md.append(f"### {page}")
             md.append("")
             for block, info in blocks:
-                md.append(f"**{block}**")
-                if info["lock"]:
-                    md.append(f"")
-                    md.append(f"> {info['lock']}")
+                lock_label = f" — **{info['lock']}**" if info["lock"] else ""
+                md.append(f"**{block}**{lock_label}")
                 md.append("")
                 for field in info["fields"]:
                     md.append(f"- {field}")
